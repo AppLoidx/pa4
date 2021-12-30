@@ -1,0 +1,22 @@
+0: process 1 (pid 24654, parent 24653) has STARTED with balance $10
+3: process 1 received all STARTED messages
+6: process 1 transferred $ 1 to process 2
+20: process 1 received $ 1 from process 3
+24: process 1 has DONE with balance $10
+25: process 1 received all DONE messages
+0: process 2 (pid 24655, parent 24653) has STARTED with balance $20
+3: process 2 received all STARTED messages
+8: process 2 received $ 1 from process 1
+12: process 2 transferred $ 2 to process 3
+24: process 2 has DONE with balance $19
+25: process 2 received all DONE messages
+0: process 3 (pid 24656, parent 24653) has STARTED with balance $30
+3: process 3 received all STARTED messages
+14: process 3 received $ 2 from process 2
+18: process 3 transferred $ 1 to process 1
+24: process 3 has DONE with balance $31
+25: process 3 received all DONE messages
+0: process 0 (pid 24653, parent 24653) has STARTED with balance $ 0
+4: process 0 received all STARTED messages
+23: process 0 has DONE with balance $ 0
+28: process 0 received all DONE messages
