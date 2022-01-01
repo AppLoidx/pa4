@@ -19,6 +19,7 @@
 #include "pa2345.h"
 #include "banking.h"
 #include "parser.h"
+#include "subheader.h"
 
 #define PARENT_ID 0 // defined in task
 #define DEBUG 1
@@ -45,7 +46,7 @@ typedef struct
     {
         local_id id;
         timestamp_t timestamp;
-    } data[CS_QUEUE_SIZE]
+    } data[CS_QUEUE_SIZE];
 } cs_queue;
 
 local_id cs_queue_find_index_of_min(cs_queue cs_queue)
@@ -87,6 +88,8 @@ local_id cs_queue_pop(cs_queue cs_queue)
     local_id id = cs_queue_find_index_of_min(cs_queue);
     cs_queue.amount--;
     cs_queue.data[id] = cs_queue.data[cs_queue.amount]; // replace min elem
+
+    return id;
 }
 
 // ----------------
@@ -494,8 +497,9 @@ int child_job(proc_data proc_data)
             stop = 1;
             break;
         }
-        
-        case CS_REQUEST: {
+
+        case CS_REQUEST:
+        {
             cs_queue_add_index(proc_data.cs_queue, src_id, msg.s_header.s_local_time);
 
             Message reply_msg;
@@ -505,11 +509,11 @@ int child_job(proc_data proc_data)
             break;
         }
 
-        case CS_RELEASE: {
+        case CS_RELEASE:
+        {
             // TODO: maybe add some assertion?
             cs_queue_pop(proc_data.cs_queue);
         }
-        
         }
     }
 
@@ -573,7 +577,11 @@ void convert_pipes(int local_id, pipe_io *pipes, int proc_amount, pipe_io *pipes
     close_pipes(pipes, amount);
 }
 
-pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int proc_amount, balance_t balance)
+pid_t create_child_proccess(int local_id,
+                            FILE *log_file,
+                            pipe_io *pipes,
+                            int proc_amount,
+                            int use_mutex)
 {
     pid_t parent_pid = getpid();
     pid_t pid = fork();
@@ -591,8 +599,11 @@ pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int pr
             .pipes = pipes_p,
             .proc_amount = proc_amount,
             .parent_pid = parent_pid,
-            .balance = balance,
-            .event_fd = log_file};
+            .event_fd = log_file,
+
+            .use_mutex = use_mutex,
+            .cs_queue = {.amount = 0},
+            .context = {0}};
 
         // child
         int job_s = child_job(proc_data);
@@ -680,7 +691,7 @@ int parent_wait(proc_data proc_data)
     return 0;
 }
 
-void start(int proc_amount, balance_t *balances)
+void start(int proc_amount, int use_mutex)
 {
 
     fclose(fopen(events_log, "w"));
@@ -696,7 +707,7 @@ void start(int proc_amount, balance_t *balances)
 
     for (int i = 1; i < proc_amount; i++)
     {
-        pids[i - 1] = create_child_proccess(i, event_file, pipes, proc_amount, balances[i - 1]);
+        pids[i - 1] = create_child_proccess(i, event_file, pipes, proc_amount, use_mutex);
     }
 
     pipe_io *pipes_p = malloc(sizeof(pipe_io) * amount);
@@ -710,7 +721,11 @@ void start(int proc_amount, balance_t *balances)
         .event_fd = event_file,
         .parent_pid = getpid(),
         .pipes = pipes_p,
-        .proc_amount = proc_amount};
+        .proc_amount = proc_amount,
+
+        .use_mutex = use_mutex,
+        .cs_queue = {.amount = 0},
+        .context = {0}};
 
     parent_wait(parent_proc_data);
 
@@ -914,8 +929,8 @@ int main(int argc, char *argv[])
     //print_history(all);
 
     int proc_amount;
-    balance_t *balances;
-    if (-1 == parse_arg(argc, argv, &proc_amount, &balances))
+    int use_mutex = 0;
+    if (-1 == parse_arg(argc, argv, &proc_amount, &use_mutex))
     {
         puts("Invalid format. Use -p ");
         return -1;
@@ -927,7 +942,7 @@ int main(int argc, char *argv[])
         return -2;
     }
 
-    start(proc_amount, balances);
+    start(proc_amount, use_mutex);
 
     // printf("%d %d", pipe_pos_count_reader(2, 0, 3), pipe_pos_count_writer(2, 1, 3));
 
