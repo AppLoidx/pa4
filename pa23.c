@@ -420,13 +420,33 @@ int child_job(proc_data proc_data)
 
         // banking loop
         Message msg;
-        receive_any(&proc_data, &msg);
+        local_id src_id;
+
+        src_id = receive_any_with_id(&proc_data, &msg);
 
         const timestamp_t timestamp = get_lamport_time(); // implemented in runtime.so
         sync_history(&balanceHistory, proc_data, timestamp);
 
         switch (msg.s_header.s_type)
         {
+        case STARTED:
+        {
+            proc_data.context.started++;
+            break;
+        }
+
+        case DONE:
+        {
+            proc_data.context.done++;
+            break;
+        }
+
+        case CS_REPLY:
+        {
+            proc_data.context.replies++;
+            break;
+        }
+
         case TRANSFER:
         {
 
@@ -474,6 +494,22 @@ int child_job(proc_data proc_data)
             stop = 1;
             break;
         }
+        
+        case CS_REQUEST: {
+            cs_queue_add_index(proc_data.cs_queue, src_id, msg.s_header.s_local_time);
+
+            Message reply_msg;
+            create_msg_empty(&reply_msg, CS_REPLY);
+            send(&proc_data, src_id, &reply_msg);
+
+            break;
+        }
+
+        case CS_RELEASE: {
+            // TODO: maybe add some assertion?
+            cs_queue_pop(proc_data.cs_queue);
+        }
+        
         }
     }
 
@@ -823,6 +859,28 @@ int receive_any(void *self, Message *msg)
     }
 
     return 0;
+}
+
+int receive_any_with_id(void *self, Message *msg)
+{
+    const proc_data *proc_data = self;
+    while (true)
+    {
+        for (local_id id = 0; id < proc_data->proc_amount; ++id)
+        {
+            if (id == proc_data->local_id)
+            {
+                continue;
+            }
+
+            if (receive(self, id, msg) == 0)
+            {
+                return id;
+            }
+        }
+    }
+
+    return -1;
 }
 
 void transfer(void *parent_data, local_id src, local_id dst,
