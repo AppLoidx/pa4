@@ -1,5 +1,6 @@
 #include <getopt.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "parser.h"
 
@@ -29,10 +30,21 @@ int parse_balances(int argc, char *argv[], int proc_amount, balance_t** balances
     return 0;
 }
 
-int parse_arg(int argc, char *argv[], int *proc_amount, balance_t** balances) {
+int parse_use_mutex(int argc, char* argv[], int* use_mutex) {
+    *use_mutex = 0;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp("--mutexl", argv[i]) == 0) {
+            *use_mutex = 1;
+        }
+    }
+
+    return 0;
+}
+
+int parse_arg(int argc, char *argv[], int *proc_amount, int *use_mutex) {
     int res = parse_proc_amount(argc, argv, proc_amount);
     if (res < 0) return res;
 
-    return parse_balances(argc, argv, *proc_amount, balances);
+    return parse_use_mutex(argc, argv, use_mutex);
 
 }
