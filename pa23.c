@@ -92,7 +92,8 @@ local_id cs_queue_pop(cs_queue cs_queue)
     return id;
 }
 
-local_id cs_queue_peek(cs_queue cs_queue) {
+local_id cs_queue_peek(cs_queue cs_queue)
+{
     return cs_queue.data[cs_queue_find_index_of_min(cs_queue)].id;
 }
 
@@ -406,6 +407,56 @@ void send_history(BalanceHistory *history, proc_data proc_data)
     send(&proc_data, PARENT_ID, &msg);
 }
 
+void message_handler(proc_data proc_data)
+{
+    // banking loop
+    Message msg;
+    local_id src_id;
+
+    src_id = receive_any_with_id(&proc_data, &msg);
+
+    const timestamp_t timestamp = get_lamport_time(); // implemented in runtime.so
+
+    switch (msg.s_header.s_type)
+    {
+    case STARTED:
+    {
+        proc_data.context.started++;
+        break;
+    }
+
+    case DONE:
+    {
+        proc_data.context.done++;
+        break;
+    }
+
+    case CS_REPLY:
+    {
+        proc_data.context.replies++;
+        break;
+    }
+
+    case CS_REQUEST:
+    {
+        cs_queue_add_index(proc_data.cs_queue, src_id, msg.s_header.s_local_time);
+
+        Message reply_msg;
+        create_msg_empty(&reply_msg, CS_REPLY);
+        send(&proc_data, src_id, &reply_msg);
+
+        break;
+    }
+
+    case CS_RELEASE:
+    {
+        // TODO: maybe add some assertion?
+        cs_queue_pop(proc_data.cs_queue);
+        break;
+    }
+    }
+}
+
 int child_job(proc_data proc_data)
 {
     // started
@@ -419,120 +470,8 @@ int child_job(proc_data proc_data)
 
     // banking
 
-    // init history
-    BalanceHistory balanceHistory = {.s_id = proc_data.local_id, .s_history_len = 0};
-    int stop = 0;
-    while (stop == 0)
-    {
+    message_handler(proc_data); // call for msg handle
 
-        // banking loop
-        Message msg;
-        local_id src_id;
-
-        src_id = receive_any_with_id(&proc_data, &msg);
-
-        const timestamp_t timestamp = get_lamport_time(); // implemented in runtime.so
-        sync_history(&balanceHistory, proc_data, timestamp);
-
-        switch (msg.s_header.s_type)
-        {
-        case STARTED:
-        {
-            proc_data.context.started++;
-            break;
-        }
-
-        case DONE:
-        {
-            proc_data.context.done++;
-            break;
-        }
-
-        case CS_REPLY:
-        {
-            proc_data.context.replies++;
-            break;
-        }
-
-        case TRANSFER:
-        {
-
-            TransferOrder *transfer = (TransferOrder *)msg.s_payload;
-            if (transfer->s_src == proc_data.local_id)
-            {
-                // sending money to another node
-                proc_data.balance = proc_data.balance - transfer->s_amount;
-                flogger(proc_data.event_fd, log_transfer_out_fmt, timestamp, proc_data.local_id, transfer->s_amount, transfer->s_dst);
-
-                send(&proc_data, transfer->s_dst, &msg); // just re-send message from parent to dst node
-            }
-            else
-            {
-                // receiving money from another node
-                proc_data.balance = proc_data.balance + transfer->s_amount;
-
-                for (timestamp_t i = msg.s_header.s_local_time - 1; i < timestamp; ++i)
-                {
-                    balanceHistory.s_history[i].s_balance_pending_in += transfer->s_amount;
-                }
-
-                flogger(proc_data.event_fd, log_transfer_in_fmt, timestamp, proc_data.local_id, transfer->s_amount, transfer->s_src);
-
-                Message ack_msg;
-                create_msg_empty(&ack_msg, ACK);
-
-                send(&proc_data, PARENT_ID, &ack_msg); // inform parent
-            }
-
-            break;
-        }
-
-        case STOP:
-        {
-            // just save last balance before end
-
-            int curr_len = balanceHistory.s_history_len;
-
-            balanceHistory.s_history[curr_len].s_time = balanceHistory.s_history_len;
-            balanceHistory.s_history[curr_len].s_balance = proc_data.balance;
-            balanceHistory.s_history[curr_len].s_balance_pending_in = 0;
-            balanceHistory.s_history_len++;
-
-            stop = 1;
-            break;
-        }
-
-        case CS_REQUEST:
-        {
-            cs_queue_add_index(proc_data.cs_queue, src_id, msg.s_header.s_local_time);
-
-            Message reply_msg;
-            create_msg_empty(&reply_msg, CS_REPLY);
-            send(&proc_data, src_id, &reply_msg);
-
-            break;
-        }
-
-        case CS_RELEASE:
-        {
-            // TODO: maybe add some assertion?
-            cs_queue_pop(proc_data.cs_queue);
-        }
-        }
-    }
-
-    // done
-
-    Message msg_done;
-    create_msg(&msg_done, DONE, log_done_fmt, get_lamport_time(), proc_data.local_id, proc_data.balance);
-
-    flogger(proc_data.event_fd, log_done_fmt, get_lamport_time(), proc_data.local_id, proc_data.balance);
-    send_multicast(&proc_data, &msg_done);
-
-    // receive_all_done_msg(proc_data);
-    flogger(proc_data.event_fd, log_received_all_done_fmt, get_lamport_time(), proc_data.local_id);
-
-    send_history(&balanceHistory, proc_data);
 
     return 0;
 }
@@ -946,11 +885,13 @@ int release_cs(const void *self)
 {
     proc_data *proc_data = self;
 
-    if (proc_data->cs_queue.amount == 0) {
+    if (proc_data->cs_queue.amount == 0)
+    {
         return -1; // TODO bad thing happened
     }
 
-    if (cs_queue_peek(proc_data->cs_queue) != proc_data->local_id) {
+    if (cs_queue_peek(proc_data->cs_queue) != proc_data->local_id)
+    {
         return -100; // another shit happened
     }
 
@@ -960,7 +901,6 @@ int release_cs(const void *self)
     create_msg_empty(&release_msg, CS_RELEASE);
 
     return send_multicast(proc_data, &release_msg);
-
 }
 
 int main(int argc, char *argv[])
