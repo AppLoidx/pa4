@@ -92,6 +92,10 @@ local_id cs_queue_pop(cs_queue cs_queue)
     return id;
 }
 
+local_id cs_queue_peek(cs_queue cs_queue) {
+    return cs_queue.data[cs_queue_find_index_of_min(cs_queue)].id;
+}
+
 // ----------------
 
 typedef struct
@@ -921,6 +925,42 @@ void transfer(void *parent_data, local_id src, local_id dst,
     Message msg_r;
     receive_block(proc_data, dst, &msg_r);
     assert(msg_r.s_header.s_type = ACK);
+}
+
+int request_cs(const void *self)
+{
+    proc_data *proc_data = self;
+
+    Message request_msg;
+    create_msg_empty(&request_msg, CS_REQUEST);
+
+    send_multicast(proc_data, &request_msg);
+
+    cs_queue_add_index(proc_data->cs_queue, proc_data->local_id, get_lamport_time());
+    proc_data->context.replies = 0;
+
+    return 0;
+}
+
+int release_cs(const void *self)
+{
+    proc_data *proc_data = self;
+
+    if (proc_data->cs_queue.amount == 0) {
+        return -1; // TODO bad thing happened
+    }
+
+    if (cs_queue_peek(proc_data->cs_queue) != proc_data->local_id) {
+        return -100; // another shit happened
+    }
+
+    cs_queue_pop(proc_data->cs_queue);
+
+    Message release_msg;
+    create_msg_empty(&release_msg, CS_RELEASE);
+
+    return send_multicast(proc_data, &release_msg);
+
 }
 
 int main(int argc, char *argv[])
