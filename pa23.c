@@ -49,9 +49,21 @@ typedef struct
     } data[CS_QUEUE_SIZE];
 } cs_queue;
 
-void print_queue(cs_queue * cs_queue) {
+void print_queue(cs_queue *cs_queue)
+{
     puts("QUEUE:");
-    for (int i = 0; i < cs_queue->amount; i++) {
+    for (int i = 0; i < cs_queue->amount; i++)
+    {
+        printf("ID: %d; TIME: %d\n", cs_queue->data[i].id, cs_queue->data[i].timestamp);
+    }
+    puts("-------");
+}
+
+void print_queue_all(cs_queue *cs_queue)
+{
+    puts("QUEUE ALL:");
+    for (int i = 0; i < CS_QUEUE_SIZE; i++)
+    {
         printf("ID: %d; TIME: %d\n", cs_queue->data[i].id, cs_queue->data[i].timestamp);
     }
     puts("-------");
@@ -59,9 +71,9 @@ void print_queue(cs_queue * cs_queue) {
 
 local_id cs_queue_find_index_of_min(cs_queue *cs_queue)
 {
-    if (cs_queue->amount <= 0) {
-        printf("ERROR: cs_queue amount is %zu\n", cs_queue->amount);
-        print_queue(cs_queue);
+    if (cs_queue->amount <= 0)
+    {
+        printf("ERROR: cs_queue amount is %zu; PID: %d\n", cs_queue->amount, getpid());
     }
     assert(cs_queue->amount > 0);
 
@@ -69,7 +81,7 @@ local_id cs_queue_find_index_of_min(cs_queue *cs_queue)
     timestamp_t min_time = INT16_MAX;
     local_id index;
 
-    for (local_id i = 0; i < cs_queue->amount; ++i)
+    for (local_id i = 0; i < cs_queue->amount; i++)
     {
         if (min_time < cs_queue->data[i].timestamp)
         {
@@ -94,20 +106,24 @@ void cs_queue_add_index(cs_queue *cs_queue, local_id id, timestamp_t t)
 {
     cs_queue->data[cs_queue->amount].id = id;
     cs_queue->data[cs_queue->amount].timestamp = t;
-    cs_queue->amount++;
+    cs_queue->amount = cs_queue->amount + 1;
 }
 
 local_id cs_queue_pop(cs_queue *cs_queue, local_id target_id)
 {
+
     // id for assertion
     local_id id = cs_queue_find_index_of_min(cs_queue);
-    if (cs_queue->data[id].id != target_id) {
+    if (cs_queue->data[id].id != target_id)
+    {
         printf("ERROR: Min : %d ; Target : %d; PID: %d\n", cs_queue->data[id].id, target_id, getpid());
         print_queue(cs_queue);
+        print_queue_all(cs_queue);
     }
+
     assert(cs_queue->data[id].id == target_id);
 
-    cs_queue->amount--;
+    cs_queue->amount = cs_queue->amount - 1;
     cs_queue->data[id] = cs_queue->data[cs_queue->amount]; // replace min elem
 
     return id;
@@ -372,17 +388,6 @@ bool create_msg_empty(Message *msg, MessageType type)
     return true;
 }
 
-
-bool create_msg_empty_with_time(Message *msg, MessageType type, timestamp_t timestamp)
-{
-    msg->s_header.s_magic = MESSAGE_MAGIC;
-    msg->s_header.s_type = type;
-    msg->s_header.s_payload_len = 0;
-    msg->s_header.s_local_time = timestamp;
-
-    return true;
-}
-
 // warning! uses blocking IO
 int receive_all_X_msg(proc_data proc_data, int16_t type)
 {
@@ -416,39 +421,16 @@ int receive_all_done_msg(proc_data proc_data)
     return receive_all_X_msg(proc_data, DONE);
 }
 
-void sync_history(BalanceHistory *balanceHistory, proc_data proc_data, timestamp_t timestamp)
-{
-    for (timestamp_t current_history_len = balanceHistory->s_history_len; current_history_len < timestamp; ++current_history_len)
-    {
-        balanceHistory->s_history[current_history_len].s_time = current_history_len;
-        balanceHistory->s_history[current_history_len].s_balance = proc_data.balance;
-        balanceHistory->s_history[current_history_len].s_balance_pending_in = 0; // must be 0 on pa2
-    }
-
-    balanceHistory->s_history_len = timestamp;
-}
-
-void send_history(BalanceHistory *history, proc_data proc_data)
-{
-    Message msg;
-    msg.s_header.s_magic = MESSAGE_MAGIC;
-    msg.s_header.s_type = BALANCE_HISTORY;
-    // TODO: check offset
-    msg.s_header.s_payload_len = offsetof(BalanceHistory, s_history) + sizeof(BalanceState) * history->s_history_len;
-    memcpy(msg.s_payload, history, msg.s_header.s_payload_len);
-
-    send(&proc_data, PARENT_ID, &msg);
-}
-
 void message_handler(proc_data *proc_data)
 {
 
     Message msg;
     local_id src_id;
 
-    src_id = receive_any_with_id(proc_data, &msg);
+    src_id = receive_any(proc_data, &msg);
 
-    if (src_id < 0) {
+    if (src_id < 0)
+    {
         puts("AW SHIT!");
         return;
     }
@@ -486,8 +468,11 @@ void message_handler(proc_data *proc_data)
 
     case CS_RELEASE:
     {
-        // TODO: maybe add some assertion?
-        cs_queue_pop(&(proc_data->cs_queue), src_id);
+        if (proc_data->cs_queue.amount > 0)
+        {
+            cs_queue_pop(&(proc_data->cs_queue), src_id);
+        }
+
         break;
     }
     }
@@ -512,11 +497,11 @@ int child_job(proc_data proc_data)
 
     flogger(proc_data.event_fd, log_received_all_started_fmt, get_lamport_time(), proc_data.local_id);
 
-    // *************************
+    // ***************************
     // main logic (effective work)
 
-    size_t itereations = proc_data.local_id * 5;
-    for (int i = 1; i <= itereations; i++)
+    int iterations = proc_data.local_id * 5;
+    for (int i = 1; i <= iterations; i++)
     {
         if (proc_data.use_mutex)
         {
@@ -526,7 +511,9 @@ int child_job(proc_data proc_data)
             }
         }
 
-        flogger(proc_data.event_fd, log_loop_operation_fmt, proc_data.local_id, i, itereations);
+        char str[256];
+        snprintf(str, 256, log_loop_operation_fmt, proc_data.local_id, i, iterations);
+        print(str);
 
         if (proc_data.use_mutex)
         {
@@ -541,6 +528,7 @@ int child_job(proc_data proc_data)
     // done block
 
     flogger(proc_data.event_fd, log_done_fmt, get_lamport_time(), proc_data.local_id, 0);
+
     Message msg_done;
     create_msg(&msg_done, DONE, log_done_fmt, get_lamport_time(), proc_data.local_id, 0);
 
@@ -550,6 +538,7 @@ int child_job(proc_data proc_data)
     {
         message_handler(&proc_data);
     }
+
     flogger(proc_data.event_fd, log_received_all_done_fmt, get_lamport_time(), proc_data.local_id);
 
     return 0;
@@ -642,54 +631,6 @@ pid_t create_child_proccess(int local_id,
 
 int kill(pid_t pid, int sig);
 
-int send_stop_msg_to_all(proc_data proc_data)
-{
-
-    Message msg;
-
-    msg.s_header.s_magic = MESSAGE_MAGIC;
-    msg.s_header.s_type = STOP;
-    msg.s_header.s_payload_len = 0;
-
-    if (send_multicast(&proc_data, &msg) < 0)
-    {
-        return -1;
-    }
-    else
-    {
-        return 0;
-    }
-}
-
-int receive_history(AllHistory *historyAll, proc_data proc_data)
-{
-    historyAll->s_history_len = proc_data.proc_amount - 1;
-
-    for (local_id id = 1; id < proc_data.proc_amount; ++id)
-    {
-        Message msg;
-
-        if (receive_block(&proc_data, id, &msg) < 0)
-        {
-            return -1;
-        }
-
-        assert(msg.s_header.s_type == BALANCE_HISTORY);
-
-        const BalanceHistory *const history = (BalanceHistory *)msg.s_payload;
-
-        historyAll->s_history[id - 1].s_id = history->s_id;
-        historyAll->s_history[id - 1].s_history_len = history->s_history_len;
-
-        for (size_t i = 0; i < history->s_history_len; ++i)
-        {
-            historyAll->s_history[id - 1].s_history[i] = history->s_history[i];
-        }
-    }
-
-    return 0;
-}
-
 int parent_wait(proc_data proc_data)
 {
 
@@ -699,9 +640,10 @@ int parent_wait(proc_data proc_data)
     while (done < required_amount || started < required_amount)
     {
         Message msg;
-        local_id src_id = receive_any_with_id(&proc_data, &msg);
+        local_id src_id = receive_any(&proc_data, &msg);
 
-        if (src_id < 0) {
+        if (src_id < 0)
+        {
             puts("PARENT WAIT SHIT HAPPENED");
         }
 
@@ -776,6 +718,55 @@ void start(int proc_amount, int use_mutex)
     {
         kill(pids[i], SIGKILL);
     }
+}
+
+bool read_all_data(int fd, void *buf, size_t remaining)
+{
+    uint8_t *buf_ptr = buf;
+    if (remaining == 0)
+    {
+        return true;
+    }
+
+    errno = 0;
+
+    while (true)
+    {
+        const ssize_t read_bytes = read(fd, buf_ptr, remaining);
+
+        if (read_bytes < 0)
+        {
+            if (buf_ptr != buf)
+            {
+                if (errno == EWOULDBLOCK || errno == EPIPE)
+                {
+                    continue;
+                }
+            }
+
+            break;
+        }
+
+        if (read_bytes == 0)
+        {
+            if (errno == 0)
+            {
+                errno = EPIPE;
+            }
+
+            break;
+        }
+
+        remaining -= read_bytes;
+        buf_ptr += read_bytes;
+
+        if (remaining == 0)
+        { // all data read
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /** Send a message to the process specified by id.
@@ -859,15 +850,20 @@ int receive(void *self, local_id from, Message *msg)
     const proc_data *proc_data = self;
     const int pipe_index = pipe_pos_count_reader(proc_data->local_id, from, proc_data->proc_amount);
 
-    if (0 > read(proc_data->pipes[pipe_index].in, &(msg->s_header), sizeof(MessageHeader)))
+    if (!read_all_data(proc_data->pipes[pipe_index].in, &(msg->s_header), sizeof(MessageHeader)))
     {
         return -1;
     }
 
-    if (0 > read(proc_data->pipes[pipe_index].in, msg->s_payload, msg->s_header.s_payload_len))
+    while (!read_all_data(proc_data->pipes[pipe_index].in, msg->s_payload, msg->s_header.s_payload_len))
     {
+        if (errno == EWOULDBLOCK || errno == EAGAIN)
+        {
+            sched_yield();
+            continue;
+        }
 
-        return -20;
+        return -2;
     }
 
     if (lamport_time < msg->s_header.s_local_time)
@@ -891,28 +887,6 @@ int receive(void *self, local_id from, Message *msg)
  * @return 0 on success, any non-zero value on error
  */
 int receive_any(void *self, Message *msg)
-{
-    const proc_data *proc_data = self;
-    while (true)
-    {
-        for (local_id id = 0; id < proc_data->proc_amount; ++id)
-        {
-            if (id == proc_data->local_id)
-            {
-                continue;
-            }
-
-            if (receive(self, id, msg) == 0)
-            {
-                return 0;
-            }
-        }
-    }
-
-    return 0;
-}
-
-int receive_any_with_id(void *self, Message *msg)
 {
     const proc_data *proc_data = self;
     while (true)
@@ -970,8 +944,6 @@ int request_cs(const void *self)
     // stupid c :((
     proc_data *proc_obj = ((proc_data *)self);
 
-    timestamp_t time;
-
     Message request_msg;
     create_msg_empty(&request_msg, CS_REQUEST);
 
@@ -995,6 +967,7 @@ int release_cs(const void *self)
 
     if (proc_obj->cs_queue.amount == 0)
     {
+        puts("RELEASE CS WITH AMOUNT 0");
         return -1; // TODO bad thing happened
     }
 
