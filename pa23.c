@@ -49,52 +49,73 @@ typedef struct
     } data[CS_QUEUE_SIZE];
 } cs_queue;
 
-local_id cs_queue_find_index_of_min(cs_queue cs_queue)
+void print_queue(cs_queue * cs_queue) {
+    puts("QUEUE:");
+    for (int i = 0; i < cs_queue->amount; i++) {
+        printf("ID: %d; TIME: %d\n", cs_queue->data[i].id, cs_queue->data[i].timestamp);
+    }
+    puts("-------");
+}
+
+local_id cs_queue_find_index_of_min(cs_queue *cs_queue)
 {
+    if (cs_queue->amount <= 0) {
+        printf("ERROR: cs_queue amount is %zu\n", cs_queue->amount);
+        print_queue(cs_queue);
+    }
+    assert(cs_queue->amount > 0);
+
     local_id min_id = MAX_PROCESS_ID;
     timestamp_t min_time = INT16_MAX;
-    int index;
+    local_id index;
 
-    for (local_id i = 0; i < cs_queue.amount; i++)
+    for (local_id i = 0; i < cs_queue->amount; ++i)
     {
+        if (min_time < cs_queue->data[i].timestamp)
+        {
+            continue;
+        }
+
+        if (min_time == cs_queue->data[i].timestamp &&
+            min_id < cs_queue->data[i].id)
+        {
+            continue;
+        }
+
+        min_time = cs_queue->data[i].timestamp;
+        min_id = cs_queue->data[i].id;
         index = i;
-        if (min_time < cs_queue.data[i].timestamp)
-        {
-            continue;
-        }
-
-        if (min_time == cs_queue.data[i].timestamp &&
-            min_id < cs_queue.data[i].id)
-        {
-            continue;
-        }
-
-        min_time = cs_queue.data[i].timestamp;
-        min_id = cs_queue.data[i].id;
     }
 
     return index;
 }
 
-void cs_queue_add_index(cs_queue cs_queue, local_id id, timestamp_t t)
+void cs_queue_add_index(cs_queue *cs_queue, local_id id, timestamp_t t)
 {
-    cs_queue.data[cs_queue.amount].id = id;
-    cs_queue.data[cs_queue.amount].timestamp = t;
-    cs_queue.amount++;
+    cs_queue->data[cs_queue->amount].id = id;
+    cs_queue->data[cs_queue->amount].timestamp = t;
+    cs_queue->amount++;
 }
 
-local_id cs_queue_pop(cs_queue cs_queue)
+local_id cs_queue_pop(cs_queue *cs_queue, local_id target_id)
 {
+    // id for assertion
     local_id id = cs_queue_find_index_of_min(cs_queue);
-    cs_queue.amount--;
-    cs_queue.data[id] = cs_queue.data[cs_queue.amount]; // replace min elem
+    if (cs_queue->data[id].id != target_id) {
+        printf("ERROR: Min : %d ; Target : %d; PID: %d\n", cs_queue->data[id].id, target_id, getpid());
+        print_queue(cs_queue);
+    }
+    assert(cs_queue->data[id].id == target_id);
+
+    cs_queue->amount--;
+    cs_queue->data[id] = cs_queue->data[cs_queue->amount]; // replace min elem
 
     return id;
 }
 
-local_id cs_queue_peek(cs_queue cs_queue)
+local_id cs_queue_peek(cs_queue *cs_queue)
 {
-    return cs_queue.data[cs_queue_find_index_of_min(cs_queue)].id;
+    return cs_queue->data[cs_queue_find_index_of_min(cs_queue)].id;
 }
 
 // ----------------
@@ -119,7 +140,7 @@ typedef struct
         size_t started;
         size_t done;
         size_t replies;
-    } context;
+    } answers;
 
 } proc_data;
 
@@ -346,6 +367,18 @@ bool create_msg_empty(Message *msg, MessageType type)
     msg->s_header.s_magic = MESSAGE_MAGIC;
     msg->s_header.s_type = type;
     msg->s_header.s_payload_len = 0;
+    msg->s_header.s_local_time = get_lamport_time();
+
+    return true;
+}
+
+
+bool create_msg_empty_with_time(Message *msg, MessageType type, timestamp_t timestamp)
+{
+    msg->s_header.s_magic = MESSAGE_MAGIC;
+    msg->s_header.s_type = type;
+    msg->s_header.s_payload_len = 0;
+    msg->s_header.s_local_time = timestamp;
 
     return true;
 }
@@ -407,43 +440,46 @@ void send_history(BalanceHistory *history, proc_data proc_data)
     send(&proc_data, PARENT_ID, &msg);
 }
 
-void message_handler(proc_data proc_data)
+void message_handler(proc_data *proc_data)
 {
-    // banking loop
+
     Message msg;
     local_id src_id;
 
-    src_id = receive_any_with_id(&proc_data, &msg);
+    src_id = receive_any_with_id(proc_data, &msg);
 
-    const timestamp_t timestamp = get_lamport_time(); // implemented in runtime.so
+    if (src_id < 0) {
+        puts("AW SHIT!");
+        return;
+    }
 
     switch (msg.s_header.s_type)
     {
     case STARTED:
     {
-        proc_data.context.started++;
+        proc_data->answers.started++;
         break;
     }
 
     case DONE:
     {
-        proc_data.context.done++;
+        proc_data->answers.done++;
         break;
     }
 
     case CS_REPLY:
     {
-        proc_data.context.replies++;
+        proc_data->answers.replies++;
         break;
     }
 
     case CS_REQUEST:
     {
-        cs_queue_add_index(proc_data.cs_queue, src_id, msg.s_header.s_local_time);
+        cs_queue_add_index(&(proc_data->cs_queue), src_id, msg.s_header.s_local_time);
 
         Message reply_msg;
         create_msg_empty(&reply_msg, CS_REPLY);
-        send(&proc_data, src_id, &reply_msg);
+        send(proc_data, src_id, &reply_msg);
 
         break;
     }
@@ -451,7 +487,7 @@ void message_handler(proc_data proc_data)
     case CS_RELEASE:
     {
         // TODO: maybe add some assertion?
-        cs_queue_pop(proc_data.cs_queue);
+        cs_queue_pop(&(proc_data->cs_queue), src_id);
         break;
     }
     }
@@ -459,19 +495,62 @@ void message_handler(proc_data proc_data)
 
 int child_job(proc_data proc_data)
 {
-    // started
+    // started block
+
     Message msg_started;
     create_msg(&msg_started, STARTED, log_started_fmt, get_lamport_time(), proc_data.local_id, getpid(), proc_data.parent_pid, proc_data.balance);
 
     flogger(proc_data.event_fd, log_started_fmt, get_lamport_time(), proc_data.local_id, getpid(), proc_data.parent_pid, proc_data.balance);
     send_multicast(&proc_data, &msg_started);
-    receive_all_started_msg(proc_data);
+
+    size_t required_replies = proc_data.proc_amount - 2;
+
+    while (proc_data.answers.started < required_replies)
+    {
+        message_handler(&proc_data);
+    }
+
     flogger(proc_data.event_fd, log_received_all_started_fmt, get_lamport_time(), proc_data.local_id);
 
-    // banking
+    // *************************
+    // main logic (effective work)
 
-    message_handler(proc_data); // call for msg handle
+    size_t itereations = proc_data.local_id * 5;
+    for (int i = 1; i <= itereations; i++)
+    {
+        if (proc_data.use_mutex)
+        {
+            if (request_cs(&proc_data) < 0)
+            {
+                return -1;
+            }
+        }
 
+        flogger(proc_data.event_fd, log_loop_operation_fmt, proc_data.local_id, i, itereations);
+
+        if (proc_data.use_mutex)
+        {
+            if (release_cs(&proc_data) < 0)
+            {
+                return -2;
+            }
+        }
+    }
+
+    // *************************
+    // done block
+
+    flogger(proc_data.event_fd, log_done_fmt, get_lamport_time(), proc_data.local_id, 0);
+    Message msg_done;
+    create_msg(&msg_done, DONE, log_done_fmt, get_lamport_time(), proc_data.local_id, 0);
+
+    send_multicast(&proc_data, &msg_done);
+
+    while (proc_data.answers.done < required_replies)
+    {
+        message_handler(&proc_data);
+    }
+    flogger(proc_data.event_fd, log_received_all_done_fmt, get_lamport_time(), proc_data.local_id);
 
     return 0;
 }
@@ -546,7 +625,7 @@ pid_t create_child_proccess(int local_id,
 
             .use_mutex = use_mutex,
             .cs_queue = {.amount = 0},
-            .context = {0}};
+            .answers = {0}};
 
         // child
         int job_s = child_job(proc_data);
@@ -614,22 +693,36 @@ int receive_history(AllHistory *historyAll, proc_data proc_data)
 int parent_wait(proc_data proc_data)
 {
 
-    flogger(proc_data.event_fd, log_started_fmt, get_lamport_time(), proc_data.local_id, getpid(), proc_data.parent_pid, proc_data.balance);
-    receive_all_started_msg(proc_data);
-    flogger(proc_data.event_fd, log_received_all_started_fmt, get_lamport_time(), proc_data.local_id);
+    size_t required_amount = proc_data.proc_amount - 1;
+    size_t started = 0, done = 0;
 
-    bank_robbery(&proc_data, proc_data.proc_amount - 1);
+    while (done < required_amount || started < required_amount)
+    {
+        Message msg;
+        local_id src_id = receive_any_with_id(&proc_data, &msg);
 
-    send_stop_msg_to_all(proc_data);
+        if (src_id < 0) {
+            puts("PARENT WAIT SHIT HAPPENED");
+        }
 
-    flogger(proc_data.event_fd, log_done_fmt, get_lamport_time(), proc_data.local_id, proc_data.balance);
-    receive_all_done_msg(proc_data);
-    flogger(proc_data.event_fd, log_received_all_done_fmt, get_lamport_time(), proc_data.local_id);
+        switch (msg.s_header.s_type)
+        {
+        case DONE:
+        {
+            done++;
+            break;
+        }
 
-    AllHistory allHistory;
-    receive_history(&allHistory, proc_data);
+        case STARTED:
+        {
+            started++;
+            break;
+        }
 
-    print_history(&allHistory);
+        default:
+            break;
+        }
+    }
 
     return 0;
 }
@@ -668,7 +761,7 @@ void start(int proc_amount, int use_mutex)
 
         .use_mutex = use_mutex,
         .cs_queue = {.amount = 0},
-        .context = {0}};
+        .answers = {0}};
 
     parent_wait(parent_proc_data);
 
@@ -835,6 +928,11 @@ int receive_any_with_id(void *self, Message *msg)
             {
                 return id;
             }
+
+            if (errno != EPIPE && errno != EWOULDBLOCK && errno != EAGAIN)
+            {
+                return -1;
+            }
         }
     }
 
@@ -868,39 +966,49 @@ void transfer(void *parent_data, local_id src, local_id dst,
 
 int request_cs(const void *self)
 {
-    proc_data *proc_data = self;
+
+    // stupid c :((
+    proc_data *proc_obj = ((proc_data *)self);
+
+    timestamp_t time;
 
     Message request_msg;
     create_msg_empty(&request_msg, CS_REQUEST);
 
-    send_multicast(proc_data, &request_msg);
+    send_multicast(proc_obj, &request_msg);
+    cs_queue_add_index(&(proc_obj->cs_queue), proc_obj->local_id, get_lamport_time());
+    proc_obj->answers.replies = 0;
 
-    cs_queue_add_index(proc_data->cs_queue, proc_data->local_id, get_lamport_time());
-    proc_data->context.replies = 0;
+    const local_id required_replies_amount = (local_id)(proc_obj->proc_amount - 2);
+
+    while (proc_obj->answers.replies < required_replies_amount || cs_queue_peek(&(proc_obj->cs_queue)) != proc_obj->local_id)
+    {
+        message_handler(proc_obj);
+    }
 
     return 0;
 }
 
 int release_cs(const void *self)
 {
-    proc_data *proc_data = self;
+    proc_data *proc_obj = ((proc_data *)self);
 
-    if (proc_data->cs_queue.amount == 0)
+    if (proc_obj->cs_queue.amount == 0)
     {
         return -1; // TODO bad thing happened
     }
 
-    if (cs_queue_peek(proc_data->cs_queue) != proc_data->local_id)
+    if (cs_queue_peek(&(proc_obj->cs_queue)) != proc_obj->local_id)
     {
         return -100; // another shit happened
     }
 
-    cs_queue_pop(proc_data->cs_queue);
+    cs_queue_pop(&(proc_obj->cs_queue), proc_obj->local_id);
 
     Message release_msg;
     create_msg_empty(&release_msg, CS_RELEASE);
 
-    return send_multicast(proc_data, &release_msg);
+    return send_multicast(proc_obj, &release_msg);
 }
 
 int main(int argc, char *argv[])
