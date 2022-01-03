@@ -6,6 +6,7 @@
 
 int parse_proc_amount(int argc, char *argv[], int *proc_amount)
 {
+    opterr = 0;
     int opt;
 
     while ((opt = getopt(argc, argv, "p:")) > 0)
