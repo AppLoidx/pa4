@@ -29,6 +29,15 @@
 #define MAX_PROC 10
 #define CS_QUEUE_SIZE MAX_PROC + 1
 
+#define CS_STATES_SIZE MAX_PROC + 1
+
+enum cs_state
+{
+    CS_OUT,
+    CS_WAIT,
+    CS_IN
+};
+
 timestamp_t lamport_time = 0;
 
 typedef struct
@@ -69,71 +78,6 @@ void print_queue_all(cs_queue *cs_queue)
     puts("-------");
 }
 
-local_id cs_queue_find_index_of_min(cs_queue *cs_queue)
-{
-    if (cs_queue->amount <= 0)
-    {
-        printf("ERROR: cs_queue amount is %zu; PID: %d\n", cs_queue->amount, getpid());
-    }
-    assert(cs_queue->amount > 0);
-
-    local_id min_id = MAX_PROCESS_ID;
-    timestamp_t min_time = INT16_MAX;
-    local_id index;
-
-    for (local_id i = 0; i < cs_queue->amount; i++)
-    {
-        if (min_time < cs_queue->data[i].timestamp)
-        {
-            continue;
-        }
-
-        if (min_time == cs_queue->data[i].timestamp &&
-            min_id < cs_queue->data[i].id)
-        {
-            continue;
-        }
-
-        min_time = cs_queue->data[i].timestamp;
-        min_id = cs_queue->data[i].id;
-        index = i;
-    }
-
-    return index;
-}
-
-void cs_queue_add_index(cs_queue *cs_queue, local_id id, timestamp_t t)
-{
-    cs_queue->data[cs_queue->amount].id = id;
-    cs_queue->data[cs_queue->amount].timestamp = t;
-    cs_queue->amount = cs_queue->amount + 1;
-}
-
-local_id cs_queue_pop(cs_queue *cs_queue, local_id target_id)
-{
-
-    // id for assertion
-    local_id id = cs_queue_find_index_of_min(cs_queue);
-    if (cs_queue->data[id].id != target_id)
-    {
-        printf("ERROR: Min : %d ; Target : %d; PID: %d\n", cs_queue->data[id].id, target_id, getpid());
-        print_queue(cs_queue);
-        print_queue_all(cs_queue);
-    }
-
-    assert(cs_queue->data[id].id == target_id);
-
-    cs_queue->amount = cs_queue->amount - 1;
-    cs_queue->data[id] = cs_queue->data[cs_queue->amount]; // replace min elem
-
-    return id;
-}
-
-local_id cs_queue_peek(cs_queue *cs_queue)
-{
-    return cs_queue->data[cs_queue_find_index_of_min(cs_queue)].id;
-}
-
 // ----------------
 
 typedef struct
@@ -157,6 +101,10 @@ typedef struct
         size_t done;
         size_t replies;
     } answers;
+
+    enum cs_state cs_curr_state;
+    int cs_states[CS_STATES_SIZE];
+    timestamp_t wait_time;
 
 } proc_data;
 
@@ -421,6 +369,13 @@ int receive_all_done_msg(proc_data proc_data)
     return receive_all_X_msg(proc_data, DONE);
 }
 
+// returns bool value
+int send_reply_msg_on_wait(proc_data *proc_data, local_id src_id, Message msg)
+{
+    return proc_data->wait_time > msg.s_header.s_local_time || (proc_data->wait_time == msg.s_header.s_local_time &&
+                                                                proc_data->local_id > src_id);
+}
+
 void message_handler(proc_data *proc_data)
 {
 
@@ -457,23 +412,40 @@ void message_handler(proc_data *proc_data)
 
     case CS_REQUEST:
     {
-        cs_queue_add_index(&(proc_data->cs_queue), src_id, msg.s_header.s_local_time);
-
-        Message reply_msg;
-        create_msg_empty(&reply_msg, CS_REPLY);
-        send(proc_data, src_id, &reply_msg);
-
-        break;
-    }
-
-    case CS_RELEASE:
-    {
-        if (proc_data->cs_queue.amount > 0)
+        switch (proc_data->cs_curr_state)
         {
-            cs_queue_pop(&(proc_data->cs_queue), src_id);
+        case CS_OUT:
+        {
+            Message reply_msg;
+            create_msg_empty(&reply_msg, CS_REPLY);
+            send(proc_data, src_id, &reply_msg);
+            break;
+        }
+        case CS_WAIT:
+        {
+            if (send_reply_msg_on_wait(proc_data, src_id, msg))
+            {
+                Message reply_msg;
+                create_msg_empty(&reply_msg, CS_REPLY);
+                send(proc_data, src_id, &reply_msg);
+                break;
+            }
+            else
+            {
+                proc_data->cs_states[src_id] = 1;
+                break;
+            }
         }
 
-        break;
+        case CS_IN:
+        {
+            proc_data->cs_states[src_id] = 1;
+            break;
+        }
+
+        default:
+            break;
+        }
     }
     }
 }
@@ -614,7 +586,9 @@ pid_t create_child_proccess(int local_id,
 
             .use_mutex = use_mutex,
             .cs_queue = {.amount = 0},
-            .answers = {0}};
+            .answers = {0},
+            .cs_curr_state = CS_OUT,
+            .cs_states = {0}};
 
         // child
         int job_s = child_job(proc_data);
@@ -948,15 +922,19 @@ int request_cs(const void *self)
     create_msg_empty(&request_msg, CS_REQUEST);
 
     send_multicast(proc_obj, &request_msg);
-    cs_queue_add_index(&(proc_obj->cs_queue), proc_obj->local_id, get_lamport_time());
+
     proc_obj->answers.replies = 0;
+    proc_obj->cs_curr_state = CS_WAIT;
+    proc_obj->wait_time = get_lamport_time();
 
     const local_id required_replies_amount = (local_id)(proc_obj->proc_amount - 2);
 
-    while (proc_obj->answers.replies < required_replies_amount || cs_queue_peek(&(proc_obj->cs_queue)) != proc_obj->local_id)
+    while (proc_obj->answers.replies < required_replies_amount)
     {
         message_handler(proc_obj);
     }
+
+    proc_obj->cs_curr_state = CS_IN;
 
     return 0;
 }
@@ -965,23 +943,26 @@ int release_cs(const void *self)
 {
     proc_data *proc_obj = ((proc_data *)self);
 
-    if (proc_obj->cs_queue.amount == 0)
+    if (proc_obj->cs_curr_state != CS_IN)
     {
-        puts("RELEASE CS WITH AMOUNT 0");
-        return -1; // TODO bad thing happened
+        return 0;
     }
 
-    if (cs_queue_peek(&(proc_obj->cs_queue)) != proc_obj->local_id)
+    for (local_id id = 0; id < proc_obj->proc_amount; id++)
     {
-        return -100; // another shit happened
+        if (proc_obj->cs_states[id])
+        {
+            Message msg;
+            create_msg_empty(&msg, CS_REPLY);
+
+            send(proc_obj, id, &msg);
+
+            proc_obj->cs_states[id] = 0;
+        }
     }
 
-    cs_queue_pop(&(proc_obj->cs_queue), proc_obj->local_id);
-
-    Message release_msg;
-    create_msg_empty(&release_msg, CS_RELEASE);
-
-    return send_multicast(proc_obj, &release_msg);
+    proc_obj->cs_curr_state = CS_OUT;
+    return 0;
 }
 
 int main(int argc, char *argv[])
